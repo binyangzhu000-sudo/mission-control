@@ -14,7 +14,7 @@ import { config } from './config'
 import { getAllGatewaySessions } from './sessions'
 import { parseJsonlTranscript, readSessionJsonl, type TranscriptMessage } from './transcript-parser'
 import { syncTaskOutbound } from './github-sync-engine'
-import { classifyModelProvider, getDispatchModelId, getModelByAlias, getModelByName } from './models'
+import { MODEL_CATALOG, classifyModelProvider, getDispatchModelId, getModelByAlias, getModelByName } from './models'
 import { getMiniMaxApiKey, resolveMiniMaxEndpoint } from './minimax'
 import type Database from 'better-sqlite3'
 
@@ -684,14 +684,26 @@ function anthropicDispatchId(alias: 'opus' | 'sonnet' | 'haiku', fallback: strin
   return entry && entry.provider === 'anthropic' ? getDispatchModelId(entry) : fallback
 }
 
-function classifyDirectModel(task: DispatchableTask): string {
+export function classifyDirectModel(task: DispatchableTask): string {
   // Check per-agent config override first
   if (task.agent_config) {
     try {
       const cfg = JSON.parse(task.agent_config)
       if (typeof cfg.dispatchModel === 'string' && cfg.dispatchModel) {
+        const override: string = cfg.dispatchModel
+        // Catalog names, aliases and dispatch IDs resolve to the catalog's
+        // exact wire model ID (e.g. 'atlas-deepseek' and
+        // 'atlascloud/deepseek-ai/deepseek-v4-pro' both become
+        // 'deepseek-ai/deepseek-v4-pro'). Nested IDs must not be collapsed to
+        // their last path segment, or pickProvider() can no longer see them.
+        const entry = getModelByAlias(override) ?? getModelByName(override)
+          ?? MODEL_CATALOG.find(m => getDispatchModelId(m) === override)
+        if (entry) return getDispatchModelId(entry)
+        // Uncatalogued Atlas Cloud IDs keep their prefix so pickProvider()
+        // still routes them; stripProviderPrefix() removes it on the wire.
+        if (/^atlascloud\//i.test(override)) return override
         // Strip gateway prefixes like "9router/cc/" to get bare model ID
-        return cfg.dispatchModel.replace(/^.*\//, '')
+        return override.replace(/^.*\//, '')
       }
     } catch { /* ignore */ }
   }
@@ -1381,7 +1393,7 @@ async function callLocalDirectly(task: DispatchableTask, prompt: string, model: 
   return callOpenAICompatible(task, prompt, endpoint, getLocalApiKey(), stripProviderPrefix(model), 'local')
 }
 
-async function callDirectly(task: DispatchableTask, prompt: string): Promise<AgentResponseParsed> {
+export async function callDirectly(task: DispatchableTask, prompt: string): Promise<AgentResponseParsed> {
   const model = classifyDirectModel(task)
   const provider = pickProvider(model)
   if (provider === 'minimax') return callMiniMaxDirectly(task, prompt, model)
